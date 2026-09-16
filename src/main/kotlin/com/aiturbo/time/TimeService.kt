@@ -26,7 +26,7 @@ data class TimeResponse(
 class TimeService(private val clock: Clock) {
 
     fun timeFor(location: String, zoneId: ZoneId): TimeResponse {
-        val now = ZonedDateTime.now(clock.withZone(zoneId))
+        val now = nowIn(zoneId)
         return TimeResponse(
             location = location,
             timezone = zoneId.id,
@@ -37,4 +37,7 @@ class TimeService(private val clock: Clock) {
             dayOfWeek = now.dayOfWeek.getDisplayName(TextStyle.FULL, Locale.ENGLISH),
         )
     }
+
+    /** Current date and time in [zoneId] — reusable for recording timestamps. */
+    fun nowIn(zoneId: ZoneId): ZonedDateTime = ZonedDateTime.now(clock.withZone(zoneId))
 }

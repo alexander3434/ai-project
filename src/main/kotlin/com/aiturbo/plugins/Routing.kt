@@ -1,11 +1,15 @@
 package com.aiturbo.plugins
 
+import com.aiturbo.db.DatabaseUnavailableException
 import com.aiturbo.time.TimeService
 import com.aiturbo.time.TimeZoneResolver
+import com.aiturbo.weather.WeatherUnavailableException
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.Application
 import io.ktor.server.application.application
 import io.ktor.server.application.install
+import io.ktor.server.plugins.BadRequestException
+import io.ktor.server.plugins.ContentTransformationException
 import io.ktor.server.plugins.calllogging.CallLogging
 import io.ktor.server.plugins.statuspages.StatusPages
 import io.ktor.server.response.respond
@@ -33,6 +37,23 @@ fun Application.configureRouting() {
     }
 
     install(StatusPages) {
+        exception<BadRequestException> { call, _ ->
+            call.respond(HttpStatusCode.BadRequest, ErrorResponse("Invalid request"))
+        }
+        exception<ContentTransformationException> { call, _ ->
+            call.respond(HttpStatusCode.BadRequest, ErrorResponse("Invalid request body"))
+        }
+        exception<DatabaseUnavailableException> { call, cause ->
+            call.application.environment.log.warn("Database is unavailable", cause)
+            call.respond(HttpStatusCode.ServiceUnavailable, ErrorResponse("Database is unavailable"))
+        }
+        exception<WeatherUnavailableException> { call, cause ->
+            call.application.environment.log.warn("Weather agent is unavailable", cause)
+            call.respond(
+                HttpStatusCode.ServiceUnavailable,
+                ErrorResponse(cause.message ?: "Weather agent is unavailable"),
+            )
+        }
         exception<Throwable> { call, cause ->
             call.application.environment.log.error("Unhandled exception", cause)
             call.respond(HttpStatusCode.InternalServerError, ErrorResponse("Internal server error"))
@@ -40,6 +61,8 @@ fun Application.configureRouting() {
     }
 
     routing {
+        weatherRoutes()
+
         get("/") {
             call.respond(
                 ServiceInfoResponse(

@@ -48,4 +48,12 @@ class TimeServiceTest {
         assertEquals("2026-09-10", response.date) // 12:00Z + 12h = next day
         assertEquals("00:00:00", response.time)
     }
+
+    @Test
+    fun `nowIn returns the current local date and time in the zone`() {
+        val now = service.nowIn(ZoneId.of("Europe/Moscow"))
+
+        assertEquals(ZoneId.of("Europe/Moscow"), now.zone)
+        assertEquals("2026-09-09T15:00", now.toLocalDateTime().toString())
+    }
 }

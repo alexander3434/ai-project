@@ -1,6 +1,6 @@
 plugins {
-    kotlin("jvm") version "2.1.20"
-    kotlin("plugin.serialization") version "2.1.20"
+    kotlin("jvm") version "2.3.10"
+    kotlin("plugin.serialization") version "2.3.10"
     application
 }
 
@@ -11,7 +11,7 @@ repositories {
     mavenCentral()
 }
 
-val ktorVersion = "3.1.2"
+val ktorVersion = "3.3.3"
 val koinVersion = "4.1.0"
 val coroutinesVersion = "1.10.2"
 
@@ -37,6 +37,12 @@ dependencies {
 
     // Loading the API key from a local git-ignored .env file
     implementation("io.github.cdimascio:dotenv-kotlin:6.5.1")
+
+    // Koog (JetBrains) — AI agents with LLM tools (function calling)
+    implementation("ai.koog:koog-agents:1.2.0")
+
+    // PostgreSQL JDBC driver (weather records)
+    implementation("org.postgresql:postgresql:42.7.13")
 
     // Logging
     implementation("ch.qos.logback:logback-classic:1.5.18")

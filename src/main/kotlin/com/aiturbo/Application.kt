@@ -1,5 +1,8 @@
 package com.aiturbo
 
+import com.aiturbo.db.DbConfig
+import com.aiturbo.db.JdbcWeatherRecordRepository
+import com.aiturbo.db.WeatherRecordRepository
 import com.aiturbo.plugins.configureRouting
 import com.aiturbo.plugins.configureSerialization
 import com.aiturbo.time.BuiltinTimeZoneResolver
@@ -9,6 +12,17 @@ import com.aiturbo.time.DirectZoneResolver
 import com.aiturbo.time.LlmTimeZoneResolver
 import com.aiturbo.time.TimeService
 import com.aiturbo.time.TimeZoneResolver
+import com.aiturbo.weather.GetWeatherTool
+import com.aiturbo.weather.KoogWeatherAgent
+import com.aiturbo.weather.OpenMeteoWeatherClient
+import com.aiturbo.weather.WeatherAgent
+import com.aiturbo.weather.WeatherClient
+import com.aiturbo.weather.WeatherConfig
+import com.aiturbo.weather.WeatherUnavailableException
+import com.aiturbo.weather.deepseekModel
+import com.aiturbo.weather.deepseekPromptExecutor
+import ai.koog.agents.core.tools.ToolRegistry
+import ai.koog.prompt.executor.model.PromptExecutor
 import io.github.cdimascio.dotenv.Dotenv
 import io.github.cdimascio.dotenv.dotenv
 import io.ktor.client.HttpClient
@@ -60,7 +74,7 @@ data class DeepseekConfig(
 fun resolveApiKey(configValue: String, envValue: String?, fileValue: String?): String =
     configValue.ifBlank { envValue.orEmpty() }.ifBlank { fileValue.orEmpty() }
 
-private fun loadDotenv(): Dotenv = dotenv {
+internal fun loadDotenv(): Dotenv = dotenv {
     directory = System.getProperty("user.dir")
     ignoreIfMissing = true
 }
@@ -68,7 +82,7 @@ private fun loadDotenv(): Dotenv = dotenv {
 /**
  * Production dependency graph. Tests inject their own modules instead.
  */
-fun appModules(config: DeepseekConfig): Module = module {
+fun appModules(deepseek: DeepseekConfig, db: DbConfig, weather: WeatherConfig): Module = module {
     single { Clock.systemUTC() }
     single {
         HttpClient(CIO) {
@@ -82,11 +96,26 @@ fun appModules(config: DeepseekConfig): Module = module {
             listOf(
                 DirectZoneResolver(),
                 BuiltinTimeZoneResolver(),
-                CachingTimeZoneResolver(LlmTimeZoneResolver(get(), config)),
+                CachingTimeZoneResolver(LlmTimeZoneResolver(get(), deepseek)),
             )
         )
     }
     singleOf(::TimeService)
+
+    // Weather tool (Koog) + DeepSeek agent + Postgres
+    single<WeatherClient> { OpenMeteoWeatherClient(get(), weather) }
+    single<WeatherRecordRepository> { JdbcWeatherRecordRepository(db) }
+    single { GetWeatherTool(get(), get(), get(), get()) }
+    single { ToolRegistry.builder().tool(get<GetWeatherTool>()).build() }
+    single { deepseekModel(deepseek.model) }
+    single<PromptExecutor> { deepseekPromptExecutor(deepseek) }
+    single<WeatherAgent> {
+        if (deepseek.apiKey.isBlank()) {
+            WeatherAgent { throw WeatherUnavailableException("DeepSeek API key is not configured") }
+        } else {
+            KoogWeatherAgent(get(), get(), get())
+        }
+    }
 }
 
 /**
@@ -96,7 +125,13 @@ fun appModules(config: DeepseekConfig): Module = module {
 fun Application.module(overrideModules: List<Module> = emptyList()) {
     install(Koin) {
         val koinModules = if (overrideModules.isEmpty()) {
-            listOf(appModules(DeepseekConfig.from(environment.config)))
+            listOf(
+                appModules(
+                    deepseek = DeepseekConfig.from(environment.config),
+                    db = DbConfig.from(environment.config),
+                    weather = WeatherConfig.from(environment.config),
+                )
+            )
         } else {
             overrideModules
         }
