@@ -130,6 +130,8 @@ req=1a2b3c4d stage=outbound status=200 body={"location":"Kisumu","timezone":"Afr
 
 Notes:
 
+- The chain is printed to the console (STDOUT) **and** written to `logs/ai-turbo.log` — daily
+  rotation, 7 days of history kept (git-ignored). `tail -f logs/ai-turbo.log` follows it live.
 - Body-like values (bodies, prompts, tool arguments and results) are truncated to 4096 characters
   with an explicit `…[truncated, N chars total]` marker.
 - No secret is ever logged: the DeepSeek API key and the database password appear nowhere in the
