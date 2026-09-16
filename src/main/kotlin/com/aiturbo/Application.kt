@@ -3,6 +3,7 @@ package com.aiturbo
 import com.aiturbo.db.DbConfig
 import com.aiturbo.db.JdbcWeatherRecordRepository
 import com.aiturbo.db.WeatherRecordRepository
+import com.aiturbo.log.LoggingPromptExecutor
 import com.aiturbo.plugins.configureRouting
 import com.aiturbo.plugins.configureSerialization
 import com.aiturbo.time.BuiltinTimeZoneResolver
@@ -12,6 +13,8 @@ import com.aiturbo.time.DirectZoneResolver
 import com.aiturbo.time.LlmTimeZoneResolver
 import com.aiturbo.time.TimeService
 import com.aiturbo.time.TimeZoneResolver
+import com.aiturbo.tools.ToolJsonRenderer
+import com.aiturbo.tools.ToolSpecLoader
 import com.aiturbo.weather.GetWeatherTool
 import com.aiturbo.weather.KoogWeatherAgent
 import com.aiturbo.weather.OpenMeteoWeatherClient
@@ -91,24 +94,45 @@ fun appModules(deepseek: DeepseekConfig, db: DbConfig, weather: WeatherConfig): 
             }
         }
     }
+
+    // Tool description resource — loaded once at startup, fail fast if missing or invalid
+    single(createdAtStart = true) { ToolSpecLoader.load() }
+    single { ToolJsonRenderer() }
+
+    single<WeatherClient> { OpenMeteoWeatherClient(get(), weather) }
+    single<WeatherRecordRepository> { JdbcWeatherRecordRepository(db) }
+    single { GetWeatherTool(get(), get(), get(), get(), get()) }
+    single { ToolRegistry.builder().tool(get<GetWeatherTool>()).build() }
+    single { deepseekModel(deepseek.model) }
+
+    // Every DeepSeek call goes through this decorator (the single choke point)
+    single<PromptExecutor> {
+        LoggingPromptExecutor(
+            delegate = deepseekPromptExecutor(deepseek),
+            endpoint = "${deepseek.baseUrl.trimEnd('/')}/chat/completions",
+            toolJsonRenderer = get(),
+        )
+    }
+
     single<TimeZoneResolver> {
         CompositeTimeZoneResolver(
             listOf(
                 DirectZoneResolver(),
                 BuiltinTimeZoneResolver(),
-                CachingTimeZoneResolver(LlmTimeZoneResolver(get(), deepseek)),
+                CachingTimeZoneResolver(
+                    LlmTimeZoneResolver(
+                        promptExecutor = get(),
+                        model = get(),
+                        // Lazy: the registry needs the tool, which needs this resolver (cycle break)
+                        toolDescriptorsProvider = { get<ToolRegistry>().tools.map { it.descriptor } },
+                        apiKeyConfigured = deepseek.apiKey.isNotBlank(),
+                    )
+                ),
             )
         )
     }
     singleOf(::TimeService)
 
-    // Weather tool (Koog) + DeepSeek agent + Postgres
-    single<WeatherClient> { OpenMeteoWeatherClient(get(), weather) }
-    single<WeatherRecordRepository> { JdbcWeatherRecordRepository(db) }
-    single { GetWeatherTool(get(), get(), get(), get()) }
-    single { ToolRegistry.builder().tool(get<GetWeatherTool>()).build() }
-    single { deepseekModel(deepseek.model) }
-    single<PromptExecutor> { deepseekPromptExecutor(deepseek) }
     single<WeatherAgent> {
         if (deepseek.apiKey.isBlank()) {
             WeatherAgent { throw WeatherUnavailableException("DeepSeek API key is not configured") }
