@@ -1,0 +1,17 @@
+### Gradle ###
+.gradle/
+.kotlin/
+build/
+
+### IntelliJ IDEA ###
+.idea/
+*.iml
+out/
+
+### Mac OS ###
+.DS_Store
+
+### Logs / local env ###
+logs/
+*.log
+.env

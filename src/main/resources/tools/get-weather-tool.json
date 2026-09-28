@@ -1,0 +1,14 @@
+{
+  "name": "get_weather",
+  "description": "Возвращает текущую погоду и местное время для указанного города или региона",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "location": {
+        "type": "string",
+        "description": "Город или регион, например 'Москва' или 'Berlin'"
+      }
+    },
+    "required": ["location"]
+  }
+}

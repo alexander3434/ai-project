@@ -12,7 +12,6 @@ repositories {
 }
 
 val ktorVersion = "3.3.3"
-val koinVersion = "4.1.0"
 val coroutinesVersion = "1.10.2"
 
 dependencies {
@@ -31,12 +30,12 @@ dependencies {
     implementation("io.ktor:ktor-client-cio")
     implementation("io.ktor:ktor-client-content-negotiation")
 
-    // Koin — dependency injection
-    implementation("io.insert-koin:koin-ktor:$koinVersion")
-    implementation("io.insert-koin:koin-core:$koinVersion")
+    // Kodein — dependency injection
+    implementation("org.kodein.di:kodein-di-jvm:7.32.0")
 
-    // Loading the API key from a local git-ignored .env file
-    implementation("io.github.cdimascio:dotenv-kotlin:6.5.1")
+    // Exposed ORM — both PostgreSQL databases (local `users` and read-only stage)
+    implementation("org.jetbrains.exposed:exposed-core:1.5.0")
+    implementation("org.jetbrains.exposed:exposed-jdbc:1.5.0")
 
     // Koog (JetBrains) — AI agents with LLM tools (function calling)
     implementation("ai.koog:koog-agents:1.2.0")
@@ -51,7 +50,6 @@ dependencies {
     testImplementation("io.ktor:ktor-server-test-host")
     testImplementation("io.ktor:ktor-client-mock")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:$coroutinesVersion")
-    testImplementation("io.insert-koin:koin-test:$koinVersion")
     testImplementation(kotlin("test"))
 }
 

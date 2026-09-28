@@ -1,5 +1,7 @@
 package com.aiturbo.plugins
 
+import ai.koog.http.client.KoogHttpClientException
+import ai.koog.prompt.executor.clients.LLMClientException
 import com.aiturbo.db.DatabaseUnavailableException
 import com.aiturbo.time.TimeService
 import com.aiturbo.time.TimeZoneResolver
@@ -15,7 +17,7 @@ import io.ktor.server.routing.get
 import io.ktor.server.routing.routing
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
-import org.koin.ktor.ext.inject
+import org.kodein.di.instance
 
 @Serializable
 data class ErrorResponse(val error: String)
@@ -27,8 +29,8 @@ data class ServiceInfoResponse(
 )
 
 fun Application.configureRouting() {
-    val timeService by inject<TimeService>()
-    val resolver by inject<TimeZoneResolver>()
+    val timeService: TimeService by di.instance()
+    val resolver: TimeZoneResolver by di.instance()
 
     install(StatusPages) {
         exception<BadRequestException> { call, _ ->
@@ -52,6 +54,16 @@ fun Application.configureRouting() {
                 HttpStatusCode.ServiceUnavailable,
             )
         }
+        exception<KoogHttpClientException> { call, cause ->
+            call.application.environment.log.warn("LLM provider is unavailable", cause)
+            call.beginTrace()
+            call.respondTraced(ErrorResponse("LLM provider is unavailable"), HttpStatusCode.ServiceUnavailable)
+        }
+        exception<LLMClientException> { call, cause ->
+            call.application.environment.log.warn("LLM provider is unavailable", cause)
+            call.beginTrace()
+            call.respondTraced(ErrorResponse("LLM provider is unavailable"), HttpStatusCode.ServiceUnavailable)
+        }
         exception<Throwable> { call, cause ->
             call.application.environment.log.error("Unhandled exception", cause)
             call.beginTrace()
@@ -61,6 +73,7 @@ fun Application.configureRouting() {
 
     routing {
         weatherRoutes()
+        fuelingRoutes()
 
         get("/") {
             call.beginTrace()

@@ -1,0 +1,11 @@
+{
+  "name": "find_fueling",
+  "description": "Находит заказ на пролив (заправку) по идентификатору (GUID) в данных stage: ищет запись в таблицах fuelings, fuelings_archive, fuelings_drop и связанные события, обращения и токены. Возвращает поля заказа с читаемыми датами.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "orderId": { "type": "string", "description": "Идентификатор заказа (GUID в формате 8-4-4-4-12)" }
+    },
+    "required": ["orderId"]
+  }
+}

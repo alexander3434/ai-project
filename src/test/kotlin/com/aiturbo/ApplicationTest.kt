@@ -14,7 +14,10 @@ import java.time.Clock
 import java.time.Instant
 import java.time.ZoneId
 import java.time.ZoneOffset
-import org.koin.dsl.module
+import org.kodein.di.DI
+import org.kodein.di.bind
+import org.kodein.di.instance
+import org.kodein.di.singleton
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -35,11 +38,11 @@ class ApplicationTest {
     private val recordingResolver =
         RecordingResolver(CompositeTimeZoneResolver(DirectZoneResolver(), BuiltinTimeZoneResolver()))
 
-    private val testModules = module {
-        single { Clock.fixed(Instant.parse("2026-09-09T12:00:00Z"), ZoneOffset.UTC) }
+    private val testModules = DI.Module("application-test") {
+        bind<Clock>() with singleton { Clock.fixed(Instant.parse("2026-09-09T12:00:00Z"), ZoneOffset.UTC) }
         // Offline resolver chain for route tests — no real HTTP calls.
-        single<TimeZoneResolver> { recordingResolver }
-        single { TimeService(get()) }
+        bind<TimeZoneResolver>() with singleton { recordingResolver }
+        bind<TimeService>() with singleton { TimeService(instance()) }
     }
 
     private fun requestId(lines: List<String>): String =

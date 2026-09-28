@@ -1,11 +1,24 @@
 package com.aiturbo
 
+import com.aiturbo.db.AI_TURBO_APPLICATION_NAME
 import com.aiturbo.db.DbConfig
-import com.aiturbo.db.JdbcWeatherRecordRepository
+import com.aiturbo.db.ExposedStageFuelingRepository
+import com.aiturbo.db.ExposedWeatherRecordRepository
+import com.aiturbo.db.StageDbConfig
+import com.aiturbo.db.StageFuelingRepository
 import com.aiturbo.db.WeatherRecordRepository
+import com.aiturbo.db.pgDataSource
+import com.aiturbo.fueling.FuelingAgent
+import com.aiturbo.fueling.KoogFuelingAgent
+import com.aiturbo.llm.ProviderRoutingPromptExecutor
+import com.aiturbo.llm.deepseekModel
+import com.aiturbo.llm.deepseekPromptExecutor
+import com.aiturbo.llm.ollamaModel
+import com.aiturbo.llm.ollamaPromptExecutor
 import com.aiturbo.log.LoggingPromptExecutor
 import com.aiturbo.plugins.configureRouting
 import com.aiturbo.plugins.configureSerialization
+import com.aiturbo.plugins.installDi
 import com.aiturbo.time.BuiltinTimeZoneResolver
 import com.aiturbo.time.CachingTimeZoneResolver
 import com.aiturbo.time.CompositeTimeZoneResolver
@@ -13,33 +26,35 @@ import com.aiturbo.time.DirectZoneResolver
 import com.aiturbo.time.LlmTimeZoneResolver
 import com.aiturbo.time.TimeService
 import com.aiturbo.time.TimeZoneResolver
+import com.aiturbo.tools.FindFuelingTool
+import com.aiturbo.tools.GetWeatherTool
 import com.aiturbo.tools.ToolJsonRenderer
+import com.aiturbo.tools.ToolSpec
 import com.aiturbo.tools.ToolSpecLoader
-import com.aiturbo.weather.GetWeatherTool
+import com.aiturbo.tools.weatherToolDescriptor
 import com.aiturbo.weather.KoogWeatherAgent
 import com.aiturbo.weather.OpenMeteoWeatherClient
 import com.aiturbo.weather.WeatherAgent
 import com.aiturbo.weather.WeatherClient
 import com.aiturbo.weather.WeatherConfig
 import com.aiturbo.weather.WeatherUnavailableException
-import com.aiturbo.weather.deepseekModel
-import com.aiturbo.weather.deepseekPromptExecutor
 import ai.koog.agents.core.tools.ToolRegistry
 import ai.koog.prompt.executor.model.PromptExecutor
-import io.github.cdimascio.dotenv.Dotenv
-import io.github.cdimascio.dotenv.dotenv
+import ai.koog.prompt.llm.LLModel
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.serialization.kotlinx.json.json
+import com.aiturbo.config.EnvFile
 import io.ktor.server.application.Application
-import io.ktor.server.application.install
 import io.ktor.server.config.ApplicationConfig
 import kotlinx.serialization.json.Json
-import org.koin.core.module.Module
-import org.koin.core.module.dsl.singleOf
-import org.koin.dsl.module
-import org.koin.ktor.plugin.Koin
+import org.jetbrains.exposed.v1.jdbc.Database
+import org.kodein.di.DI
+import org.kodein.di.bind
+import org.kodein.di.eagerSingleton
+import org.kodein.di.instance
+import org.kodein.di.singleton
 import java.time.Clock
 
 /**
@@ -53,7 +68,7 @@ data class DeepseekConfig(
 ) {
     companion object {
         const val DEFAULT_BASE_URL = "https://api.deepseek.com"
-        const val DEFAULT_MODEL = "deepseek-chat"
+        const val DEFAULT_MODEL = "deepseek-flash"
 
         fun from(config: ApplicationConfig): DeepseekConfig = DeepseekConfig(
             baseUrl = config.propertyOrNull("deepseek.baseUrl")?.getString() ?: DEFAULT_BASE_URL,
@@ -77,17 +92,24 @@ data class DeepseekConfig(
 fun resolveApiKey(configValue: String, envValue: String?, fileValue: String?): String =
     configValue.ifBlank { envValue.orEmpty() }.ifBlank { fileValue.orEmpty() }
 
-internal fun loadDotenv(): Dotenv = dotenv {
-    directory = System.getProperty("user.dir")
-    ignoreIfMissing = true
-}
+internal fun loadDotenv(): EnvFile = EnvFile.load()
+
+/** Tags keep the per-provider/per-database bindings apart inside one container. */
+internal const val LOCAL_DATABASE_TAG = "localDatabase"
+internal const val DEEPSEEK_EXECUTOR_TAG = "deepseekPromptExecutor"
+internal const val LOCAL_EXECUTOR_TAG = "localPromptExecutor"
 
 /**
  * Production dependency graph. Tests inject their own modules instead.
  */
-fun appModules(deepseek: DeepseekConfig, db: DbConfig, weather: WeatherConfig): Module = module {
-    single { Clock.systemUTC() }
-    single {
+fun appModules(
+    deepseek: DeepseekConfig,
+    ollama: OllamaConfig,
+    db: DbConfig,
+    weather: WeatherConfig,
+): DI.Module = DI.Module(name = "app") {
+    bind<Clock>() with singleton { Clock.systemUTC() }
+    bind<HttpClient>() with singleton {
         HttpClient(CIO) {
             install(ContentNegotiation) {
                 json(Json { ignoreUnknownKeys = true })
@@ -96,48 +118,121 @@ fun appModules(deepseek: DeepseekConfig, db: DbConfig, weather: WeatherConfig): 
     }
 
     // Tool description resource — loaded once at startup, fail fast if missing or invalid
-    single(createdAtStart = true) { ToolSpecLoader.load() }
-    single { ToolJsonRenderer() }
+    bind<ToolSpec>() with eagerSingleton { ToolSpecLoader.load() }
+    bind<ToolJsonRenderer>() with singleton { ToolJsonRenderer() }
 
-    single<WeatherClient> { OpenMeteoWeatherClient(get(), weather) }
-    single<WeatherRecordRepository> { JdbcWeatherRecordRepository(db) }
-    single { GetWeatherTool(get(), get(), get(), get(), get()) }
-    single { ToolRegistry.builder().tool(get<GetWeatherTool>()).build() }
-    single { deepseekModel(deepseek.model) }
+    bind<WeatherClient>() with singleton { OpenMeteoWeatherClient(instance(), weather) }
+    // Lazy: no connection is opened at startup.
+    bind<Database>(tag = LOCAL_DATABASE_TAG) with singleton {
+        Database.connect(
+            pgDataSource(db.jdbcUrl, db.user, db.password, applicationName = AI_TURBO_APPLICATION_NAME),
+        )
+    }
+    bind<WeatherRecordRepository>() with singleton {
+        ExposedWeatherRecordRepository(instance(tag = LOCAL_DATABASE_TAG))
+    }
+    bind<GetWeatherTool>() with singleton { GetWeatherTool(instance(), instance(), instance(), instance(), instance()) }
+    bind<ToolRegistry>() with singleton { ToolRegistry.builder().tool(instance<GetWeatherTool>()).build() }
+    bind<LLModel>() with singleton { deepseekModel(deepseek.model) }
 
-    // Every DeepSeek call goes through this decorator (the single choke point)
-    single<PromptExecutor> {
+    // Every DeepSeek call goes through this decorator (the single choke point).
+    bind<PromptExecutor>(tag = DEEPSEEK_EXECUTOR_TAG) with singleton {
         LoggingPromptExecutor(
             delegate = deepseekPromptExecutor(deepseek),
             endpoint = "${deepseek.baseUrl.trimEnd('/')}/chat/completions",
-            toolJsonRenderer = get(),
+            toolJsonRenderer = instance(),
+        )
+    }
+    // The local path mirrors it: same decorator, Ollama endpoint and model (FR-10).
+    bind<PromptExecutor>(tag = LOCAL_EXECUTOR_TAG) with singleton {
+        LoggingPromptExecutor(
+            delegate = ollamaPromptExecutor(ollama),
+            endpoint = ollama.chatEndpoint,
+            toolJsonRenderer = instance(),
+        )
+    }
+    // The single entry point every LLM call goes through (one delegate per provider underneath).
+    bind<PromptExecutor>() with singleton {
+        ProviderRoutingPromptExecutor(
+            deepseek = instance(tag = DEEPSEEK_EXECUTOR_TAG),
+            local = instance(tag = LOCAL_EXECUTOR_TAG),
+            localModel = ollamaModel(ollama.model),
+            deepseekConfigured = deepseek.apiKey.isNotBlank(),
         )
     }
 
-    single<TimeZoneResolver> {
+    bind<TimeZoneResolver>() with singleton {
         CompositeTimeZoneResolver(
             listOf(
                 DirectZoneResolver(),
                 BuiltinTimeZoneResolver(),
                 CachingTimeZoneResolver(
                     LlmTimeZoneResolver(
-                        promptExecutor = get(),
-                        model = get(),
-                        // Lazy: the registry needs the tool, which needs this resolver (cycle break)
-                        toolDescriptorsProvider = { get<ToolRegistry>().tools.map { it.descriptor } },
+                        promptExecutor = instance(),
+                        model = instance(),
+                        // The registry needs the tool, which needs this resolver: resolving it
+                        // here (even lazily) is a Kodein dependency loop, so the descriptor is
+                        // rebuilt from the same spec the tool uses.
+                        toolDescriptorsProvider = { listOf(weatherToolDescriptor(instance())) },
                         apiKeyConfigured = deepseek.apiKey.isNotBlank(),
                     )
                 ),
             )
         )
     }
-    singleOf(::TimeService)
+    bind<TimeService>() with singleton { TimeService(instance()) }
 
-    single<WeatherAgent> {
-        if (deepseek.apiKey.isBlank()) {
-            WeatherAgent { throw WeatherUnavailableException("DeepSeek API key is not configured") }
+    // Unconditional: the local path must work without a DeepSeek key (ASM-08); the
+    // blank-key guard for the DeepSeek path lives in the routing executor (FR-09).
+    bind<WeatherAgent>() with singleton { KoogWeatherAgent(instance(), instance(), instance()) }
+}
+
+/**
+ * Tags keep the fueling tool spec and registry apart from the weather ones —
+ * the untagged [ai.koog.agents.core.tools.ToolRegistry] binding must stay
+ * `get_weather`-only (the frozen AppModulesTest/TraceChainIntegrationTest
+ * assertions, D-02).
+ */
+const val FUELING_TOOL_SPEC = "fuelingToolSpec"
+const val FUELING_TOOL_REGISTRY = "fuelingToolRegistry"
+internal const val STAGE_DATABASE_TAG = "stageDatabase"
+
+/**
+ * The fueling vertical slice, additive on top of [appModules]: its own tool
+ * (name/description from the JSON resource), its own `find_fueling`-only
+ * registry and its own agent. Nothing connects to the stage database at
+ * construction, so the application starts with the stage database absent
+ * (FR-11, FR-12, FR-16).
+ */
+fun fuelingModule(stageDb: StageDbConfig, apiKeyConfigured: Boolean): DI.Module = DI.Module(name = "fueling") {
+    // Fail fast at startup when the resource is missing or invalid.
+    bind<ToolSpec>(tag = FUELING_TOOL_SPEC) with eagerSingleton {
+        ToolSpecLoader.load(ToolSpecLoader.FUELING_RESOURCE_PATH)
+    }
+    // Lazy: no connection is opened at startup, and the stage timeouts bound every call.
+    bind<Database>(tag = STAGE_DATABASE_TAG) with singleton {
+        Database.connect(
+            pgDataSource(
+                stageDb.jdbcUrl,
+                stageDb.user,
+                stageDb.password,
+                applicationName = AI_TURBO_APPLICATION_NAME,
+                timeoutSeconds = stageDb.timeoutSeconds,
+            ),
+        )
+    }
+    bind<StageFuelingRepository>() with singleton {
+        ExposedStageFuelingRepository(instance(tag = STAGE_DATABASE_TAG))
+    }
+    bind<FindFuelingTool>() with singleton { FindFuelingTool(instance(), instance(tag = FUELING_TOOL_SPEC)) }
+    bind<ToolRegistry>(tag = FUELING_TOOL_REGISTRY) with singleton {
+        ToolRegistry.builder().tool(instance<FindFuelingTool>()).build()
+    }
+    bind<FuelingAgent>() with singleton {
+        if (apiKeyConfigured) {
+            KoogFuelingAgent(instance(), instance(tag = FUELING_TOOL_REGISTRY), instance())
         } else {
-            KoogWeatherAgent(get(), get(), get())
+            FuelingAgent { throw WeatherUnavailableException("DeepSeek API key is not configured") }
         }
     }
 }
@@ -146,21 +241,29 @@ fun appModules(deepseek: DeepseekConfig, db: DbConfig, weather: WeatherConfig): 
  * Application entry point, loaded by EngineMain from application.conf.
  * [overrideModules] lets tests replace the dependency graph.
  */
-fun Application.module(overrideModules: List<Module> = emptyList()) {
-    install(Koin) {
-        val koinModules = if (overrideModules.isEmpty()) {
-            listOf(
+fun Application.module(overrideModules: List<DI.Module> = emptyList()) {
+    val di = DI {
+        if (overrideModules.isEmpty()) {
+            val deepseek = DeepseekConfig.from(environment.config)
+            import(
                 appModules(
-                    deepseek = DeepseekConfig.from(environment.config),
+                    deepseek = deepseek,
+                    ollama = OllamaConfig.from(environment.config),
                     db = DbConfig.from(environment.config),
                     weather = WeatherConfig.from(environment.config),
                 )
             )
+            import(
+                fuelingModule(
+                    stageDb = StageDbConfig.from(environment.config),
+                    apiKeyConfigured = deepseek.apiKey.isNotBlank(),
+                )
+            )
         } else {
-            overrideModules
+            overrideModules.forEach { import(it) }
         }
-        modules(koinModules)
     }
+    installDi(di)
     configureSerialization()
     configureRouting()
 }

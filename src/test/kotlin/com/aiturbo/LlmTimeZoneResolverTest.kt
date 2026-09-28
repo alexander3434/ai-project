@@ -16,7 +16,7 @@ import ai.koog.prompt.streaming.StreamFrame
 import ai.koog.serialization.typeToken
 import com.aiturbo.time.LlmTimeZoneResolver
 import com.aiturbo.time.parseZoneContent
-import com.aiturbo.weather.deepseekModel
+import com.aiturbo.llm.deepseekModel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
