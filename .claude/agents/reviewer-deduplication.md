@@ -2,7 +2,7 @@
 name: reviewer-deduplication
 description: Ревью на дублирование и избыточность + симплификация кода (упрощения, удаление мёртвого кода). Только вердикт, без дампов.
 tools: Read, Grep, Glob, Bash
-model: sonnet
+model: opus
 ---
 
 Ты — ревьюер дублирования/избыточности и симплификации проекта ai-turbo
