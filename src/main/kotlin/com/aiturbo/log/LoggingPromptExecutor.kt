@@ -9,11 +9,13 @@ import ai.koog.prompt.llm.LLModel
 import ai.koog.prompt.message.Message
 import ai.koog.prompt.params.LLMParams
 import ai.koog.prompt.streaming.StreamFrame
+import com.aiturbo.llm.StreamedAssistant
 import com.aiturbo.tools.ToolJsonRenderer
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.onEach
 
 /**
  * The single choke point for every DeepSeek call: it logs the outbound request
@@ -21,6 +23,10 @@ import kotlinx.coroutines.flow.flow
  * then delegates untouched. Nothing is filtered, reordered or added — the
  * descriptors Koog built are exactly what the wrapped executor receives, so an
  * empty `tools` array can never be introduced here (FR-01, FR-02, FR-04, FR-05).
+ *
+ * A streamed call writes the same two lines: the request carries `streaming=true`
+ * and the outcome is logged once the stream is over, assembled from its frames
+ * (D-11) — or as the failure marker when the stream breaks.
  *
  * The executor never receives the API key, headers or the configuration object:
  * only the endpoint label, the model id, the prompt and the descriptors.
@@ -53,8 +59,18 @@ class LoggingPromptExecutor(
         model: LLModel,
         tools: List<ToolDescriptor>,
     ): Flow<StreamFrame> = flow {
-        logRequest(TraceLog.currentId(), model.id, prompt, tools, streaming = true)
-        emitAll(delegate.executeStreaming(prompt, model, tools))
+        val id = TraceLog.currentId()
+        logRequest(id, model.id, prompt, tools, streaming = true)
+        val collected = StreamedAssistant()
+        try {
+            emitAll(delegate.executeStreaming(prompt, model, tools).onEach { collected.accept(it) })
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            TraceLog.deepseekFailure(id, model.id, e)
+            throw e
+        }
+        TraceLog.deepseekResponse(id, model.id, collected.toMessage())
     }
 
     override suspend fun moderate(prompt: Prompt, model: LLModel): ModerationResult =

@@ -8,8 +8,11 @@ import com.aiturbo.db.StageDbConfig
 import com.aiturbo.db.StageFuelingRepository
 import com.aiturbo.db.WeatherRecordRepository
 import com.aiturbo.db.pgDataSource
+import com.aiturbo.chat.ChatAgent
+import com.aiturbo.chat.KoogChatAgent
 import com.aiturbo.fueling.FuelingAgent
 import com.aiturbo.fueling.KoogFuelingAgent
+import com.aiturbo.llm.ProviderAvailability
 import com.aiturbo.llm.ProviderRoutingPromptExecutor
 import com.aiturbo.llm.deepseekModel
 import com.aiturbo.llm.deepseekPromptExecutor
@@ -185,6 +188,9 @@ fun appModules(
     // Unconditional: the local path must work without a DeepSeek key (ASM-08); the
     // blank-key guard for the DeepSeek path lives in the routing executor (FR-09).
     bind<WeatherAgent>() with singleton { KoogWeatherAgent(instance(), instance(), instance()) }
+
+    // The pre-stream check of `/chat` reads this flag, never the key itself (FR-09).
+    bind<ProviderAvailability>() with singleton { ProviderAvailability(deepseek.apiKey.isNotBlank()) }
 }
 
 /**
@@ -238,6 +244,27 @@ fun fuelingModule(stageDb: StageDbConfig, apiKeyConfigured: Boolean): DI.Module 
 }
 
 /**
+ * Chat tools registry tag. The chat registry holds both existing tools; the
+ * untagged and fueling registries stay single-tool (FR-15).
+ */
+const val CHAT_TOOL_REGISTRY = "chatToolRegistry"
+
+/**
+ * The chat slice, additive on top of [appModules] and [fuelingModule]: its own
+ * two-tool registry built from the shared tool singletons (nothing is duplicated)
+ * and its agent. Imported unconditionally — the local provider path must work
+ * with a blank DeepSeek key, and the DeepSeek 503 comes from
+ * [com.aiturbo.llm.ProviderAvailability] (route) and the routing executor
+ * (defense in depth).
+ */
+fun chatModule(): DI.Module = DI.Module(name = "chat") {
+    bind<ToolRegistry>(tag = CHAT_TOOL_REGISTRY) with singleton {
+        ToolRegistry.builder().tool(instance<GetWeatherTool>()).tool(instance<FindFuelingTool>()).build()
+    }
+    bind<ChatAgent>() with singleton { KoogChatAgent(instance(), instance(tag = CHAT_TOOL_REGISTRY), instance()) }
+}
+
+/**
  * Application entry point, loaded by EngineMain from application.conf.
  * [overrideModules] lets tests replace the dependency graph.
  */
@@ -259,6 +286,7 @@ fun Application.module(overrideModules: List<DI.Module> = emptyList()) {
                     apiKeyConfigured = deepseek.apiKey.isNotBlank(),
                 )
             )
+            import(chatModule())
         } else {
             overrideModules.forEach { import(it) }
         }

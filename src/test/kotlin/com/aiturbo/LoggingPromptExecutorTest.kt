@@ -46,6 +46,7 @@ private class RecordingPromptExecutor(
     private val response: Message.Assistant? = null,
     private val failure: Throwable? = null,
     private val frames: List<StreamFrame> = emptyList(),
+    private val streamFailure: Throwable? = null,
     private val onExecute: () -> Unit = {},
 ) : PromptExecutor() {
 
@@ -76,6 +77,7 @@ private class RecordingPromptExecutor(
         receivedPrompts += prompt
         receivedTools += tools
         frames.forEach { emit(it) }
+        streamFailure?.let { throw it }
     }
 
     override suspend fun moderate(prompt: Prompt, model: LLModel): ModerationResult =
@@ -223,10 +225,12 @@ class LoggingPromptExecutorTest {
     }
 
     @Test
-    fun `executeStreaming logs the request with the streaming flag and forwards the frames`() = runTest {
+    fun `executeStreaming logs the request with the streaming flag and the assembled outcome`() = runTest {
         LogCapture().use { capture ->
             val frames = listOf<StreamFrame>(
                 StreamFrame.TextDelta("привет"),
+                StreamFrame.TextDelta(", Москва"),
+                StreamFrame.TextComplete("привет, Москва"),
                 StreamFrame.End(),
             )
             val delegate = RecordingPromptExecutor(frames = frames)
@@ -235,10 +239,79 @@ class LoggingPromptExecutorTest {
 
             assertEquals(frames, received)
             assertEquals(tools, delegate.receivedTools.single())
-            assertEquals(1, capture.lines().size, capture.lines().toString())
-            assertTrue(capture.lines().single().contains("stage=deepseek-request"), capture.lines().single())
-            assertTrue(capture.lines().single().contains("streaming=true"), capture.lines().single())
-            assertTrue(capture.lines().single().contains("tools_count=1"), capture.lines().single())
+            val lines = capture.lines()
+            assertEquals(2, lines.size, lines.toString())
+            assertTrue(lines[0].contains("stage=deepseek-request"), lines[0])
+            assertTrue(lines[0].contains("streaming=true"), lines[0])
+            assertTrue(lines[0].contains("tools_count=1"), lines[0])
+            assertTrue(lines[1].contains("stage=deepseek-response model=deepseek-chat"), lines[1])
+            assertTrue(lines[1].contains("""text="привет, Москва""""), lines[1])
+            assertTrue(lines[1].contains("tool_calls=[]"), lines[1])
+        }
+    }
+
+    @Test
+    fun `executeStreaming logs a tool call assembled from the frames`() = runTest {
+        LogCapture().use { capture ->
+            val delegate = RecordingPromptExecutor(
+                frames = listOf(
+                    StreamFrame.ToolCallComplete(
+                        id = "call-1",
+                        name = "get_weather",
+                        content = """{"location":"Москва"}""",
+                    ),
+                    StreamFrame.End(),
+                ),
+            )
+
+            executor(delegate).executeStreaming(prompt, model, tools).toList()
+
+            val response = capture.lines().last()
+            assertTrue(response.contains("stage=deepseek-response model=deepseek-chat"), response)
+            assertTrue(response.contains("""tool_calls=[{"name":"get_weather","args":"{\"location\":\"Москва\"}"}]"""), response)
+        }
+    }
+
+    @Test
+    fun `a mid-stream failure is logged after the frames that were already sent and rethrown`() = runTest {
+        LogCapture().use { capture ->
+            val frames = listOf<StreamFrame>(StreamFrame.TextDelta("нача"), StreamFrame.TextDelta("ло"))
+            val delegate = RecordingPromptExecutor(
+                frames = frames,
+                streamFailure = IllegalStateException("stream broke"),
+            )
+            val received = mutableListOf<StreamFrame>()
+
+            val error = assertFailsWith<IllegalStateException> {
+                executor(delegate).executeStreaming(prompt, model, tools).collect { received += it }
+            }
+
+            assertEquals(frames, received)
+            val lines = capture.lines()
+            assertEquals(2, lines.size, lines.toString())
+            assertTrue(lines[0].contains("streaming=true"), lines[0])
+            assertTrue(lines[1].contains("stage=deepseek-response"), lines[1])
+            assertTrue(lines[1].contains("error=IllegalStateException: stream broke"), lines[1])
+            assertEquals("stream broke", error.message)
+        }
+    }
+
+    @Test
+    fun `a cancellation during the stream is rethrown without a response line`() = runTest {
+        LogCapture().use { capture ->
+            val delegate = RecordingPromptExecutor(
+                frames = listOf(StreamFrame.TextDelta("часть")),
+                streamFailure = CancellationException("cancelled"),
+            )
+
+            assertFailsWith<CancellationException> {
+                executor(delegate).executeStreaming(prompt, model, tools).toList()
+            }
+
+            val lines = capture.lines()
+            assertEquals(1, lines.size, lines.toString())
+            assertTrue(lines.single().contains("stage=deepseek-request"), lines.single())
+            assertTrue(lines.single().contains("streaming=true"), lines.single())
         }
     }
 

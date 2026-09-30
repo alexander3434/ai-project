@@ -38,10 +38,12 @@ private class RecordingExecutor(
 
     var calls = 0
     var lastModel: LLModel? = null
+    var lastResolvedModel: ResolvedModel? = null
     var lastPrompt: Prompt? = null
     var lastTools: List<ToolDescriptor>? = null
     var moderated = 0
     var streamingCalls = 0
+    var resolvedStreamingCalls = 0
     var closed = false
 
     override suspend fun execute(
@@ -72,6 +74,16 @@ private class RecordingExecutor(
     ): Flow<StreamFrame> = flow {
         streamingCalls++
         lastModel = model
+        frames.forEach { emit(it) }
+    }
+
+    override fun executeStreaming(
+        prompt: Prompt,
+        model: ResolvedModel,
+        tools: List<ToolDescriptor>,
+    ): Flow<StreamFrame> = flow {
+        resolvedStreamingCalls++
+        lastResolvedModel = model
         frames.forEach { emit(it) }
     }
 
@@ -280,5 +292,45 @@ class ProviderRoutingPromptExecutorTest {
 
         assertEquals(1, local.calls)
         assertEquals("qwen3:8b", local.lastModel?.id)
+    }
+
+    @Test
+    fun `the resolved-model streaming overload routes like the plain one`() = runTest {
+        val deepseekFrames = listOf<StreamFrame>(StreamFrame.TextDelta("deepseek"), StreamFrame.End())
+        val localFrames = listOf<StreamFrame>(StreamFrame.TextDelta("local"), StreamFrame.End())
+        val deepseek = RecordingExecutor(frames = deepseekFrames)
+        val local = RecordingExecutor(frames = localFrames)
+        val executor = routing(deepseek, local)
+
+        // Built with no element, collected inside LOCAL: the local delegate gets the configured model.
+        val builtOutside = executor.executeStreaming(prompt, ResolvedModel(deepseekChat), emptyList())
+        val localCollected = withContext(LlmTargetContext(LlmTarget.LOCAL)) {
+            builtOutside.toList()
+        }
+        assertEquals(localFrames, localCollected)
+        assertEquals(1, local.streamingCalls)
+        assertEquals(0, deepseek.streamingCalls)
+        assertEquals("qwen3:8b", local.lastModel?.id)
+
+        // The deepseek branch keeps the model that was resolved for the request.
+        val deepseekCollected = executor
+            .executeStreaming(prompt, ResolvedModel(deepseekChat), emptyList())
+            .toList()
+        assertEquals(deepseekFrames, deepseekCollected)
+        assertEquals(1, deepseek.resolvedStreamingCalls)
+        assertEquals(0, deepseek.streamingCalls)
+        assertEquals(ResolvedModel(deepseekChat), deepseek.lastResolvedModel)
+    }
+
+    @Test
+    fun `resolved-model streaming with a blank key fails at collection time`() = runTest {
+        val deepseek = RecordingExecutor()
+        val executor = routing(deepseek, RecordingExecutor(), deepseekConfigured = false)
+
+        val flow = executor.executeStreaming(prompt, ResolvedModel(deepseekChat), emptyList())
+
+        assertFailsWith<WeatherUnavailableException> { flow.toList() }
+        assertEquals(0, deepseek.streamingCalls)
+        assertEquals(0, deepseek.resolvedStreamingCalls)
     }
 }

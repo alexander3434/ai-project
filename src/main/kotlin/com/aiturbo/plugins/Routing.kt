@@ -74,6 +74,7 @@ fun Application.configureRouting() {
     routing {
         weatherRoutes()
         fuelingRoutes()
+        chatRoutes()
 
         get("/") {
             call.beginTrace()

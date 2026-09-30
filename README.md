@@ -51,6 +51,7 @@ database access goes through **Exposed**; the clock is injectable so tests run w
 | `GET /time?location=<place>` | Current date and time in that place |
 | `POST /weather` | Ask the LLM agent anything (weather questions trigger the database recording tool) |
 | `POST /fueling` | Ask the LLM agent about a fueling order (the question must carry the order GUID) |
+| `POST /chat` | One turn of a chat that has both tools (`get_weather` + `find_fueling`); the answer streams back as SSE-style frames |
 | `GET /weather/history?limit=<n>` | The most recent weather request records from the database |
 
 ### Model selection (`model` field)
@@ -277,6 +278,101 @@ README example is still found.
 
 The Postman recipe, the other cases (not found, invalid id, no id) and the exact log lines are in
 [Testing with Postman](#testing-with-postman).
+
+## Chat (`POST /chat`)
+
+`POST /chat` serves one turn of a conversation handled by a single Koog agent that has **both**
+tools — `get_weather` and `find_fueling` (the same tool singletons the weather and fueling agents
+use). The client sends the whole conversation on every turn (oldest first) and the answer comes
+back as a stream: zero or more `chunk` frames, then exactly one terminal frame.
+
+Request:
+
+```
+POST http://localhost:8080/chat
+Content-Type: application/json
+
+{"messages":[{"role":"user","content":"Какая сейчас погода в Москве?"}],
+ "model":"deepseek"}
+```
+
+| Field | Rules |
+|---|---|
+| `messages` | Non-empty list, oldest turn first, each `{"role":…,"content":…}`; `role` is `user` or `assistant` (case-insensitive, trimmed); `content` must not be blank; the **last** message must be from the user — it is the new turn, the earlier ones are replayed as history |
+| `model` | Optional, same rules as the other endpoints: absent/blank → DeepSeek, `local` → the configured Ollama model, `deepseek` → the DeepSeek API; any other non-blank value is `400` |
+
+Response: `Content-Type: text/event-stream` (no `ktor-server-sse`, the frames are written to the
+response writer and flushed as they are produced). Frame format is `event: <name>\ndata: <json>\n\n`:
+
+```
+event: chunk
+data: {"text":"Сейчас "}
+
+event: chunk
+data: {"text":"в Москве +15.4°C, облачно"}
+
+event: done
+data: {"answer":"Сейчас в Москве +15.4°C, облачно","model":"deepseek"}
+```
+
+| Frame | When | Payload |
+|---|---|---|
+| `chunk` | Per piece of the answer, in order; a turn can produce many | `{"text":"…"}` |
+| `done` | Exactly once, at the end of a successful turn | `{"answer":"…","model":"local"\|"deepseek"}`; `answer` is the concatenation of all `chunk` texts — a turn whose model produced no visible text still ends with `done`, carrying the short fallback piece as its only chunk |
+| `error` | Instead of `done` when the failure happens **after** the stream opened | `{"status":503,"error":"…"}` — the status the request would have had (`503` for the LLM provider, the database or the weather agent; `500` otherwise); the HTTP status is already `200`, the body carries the intended one |
+
+Failures detected **before** the stream opens stay ordinary JSON with the real status code:
+`400 {"error":"Field 'messages' must not be empty"}` (also `Field 'messages[i].role' must be one of:
+user, assistant`, `Field 'messages[i].content' must not be blank`, `The last message must be from
+the user`, `Field 'model' must be one of: local, deepseek`), and with no DeepSeek key configured
+`503 {"error":"DeepSeek API key is not configured"}` for `model=deepseek` (a `model=local` request
+does not need the key). An empty chunk list is valid: a turn whose model answered with no visible
+text still ends with `done`.
+
+`curl -N` prints the frames as they arrive (the `-N` disables curl's buffering — without it the
+whole stream may appear at once):
+
+```bash
+curl -N -X POST http://localhost:8080/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"messages":[{"role":"user","content":"Какая сейчас погода в Москве?"}],"model":"local"}'
+```
+
+A follow-up turn sends the whole conversation — the assistant's earlier answer is replayed, so the
+model does not ask again for the city:
+
+```json
+{"messages":[{"role":"user","content":"Какая сейчас погода в Москве?"},
+             {"role":"assistant","content":"Сейчас в Москве +15.4°C, облачно."},
+             {"role":"user","content":"А завтра?"}],
+ "model":"deepseek"}
+```
+
+**Postman:** send the same POST with `Content-Type: application/json` and
+`Accept: text/event-stream`; Postman shows the raw event stream, but some versions buffer it until
+the response ends — use `curl -N` (or the browser) to see the incremental chunks.
+
+The trace chain of one turn has the usual single `req=` id, in this order (the history replay is
+visible in the first `messages=[…]`, the streamed round carries `streaming=true`):
+
+```
+req=3f8a1c02 stage=inbound method=POST path=/chat query=- client=127.0.0.1:52410 body={"messages":[{"role":"user","content":"Какая сейчас погода в Москве?"}],"model":"deepseek"}
+req=3f8a1c02 stage=deepseek-request endpoint=https://api.deepseek.com/chat/completions model=deepseek-flash tool_choice=- tools_count=2 tools=[…get_weather…,…find_fueling…] messages=[system: "Ты — ассистент по погоде и заказам на пролив (заправку)…", user: "Какая сейчас погода в Москве?"]
+req=3f8a1c02 stage=deepseek-response model=deepseek-flash text="" tool_calls=[{"name":"get_weather","args":"{\"location\":\"Москва\"}"}]
+req=3f8a1c02 stage=db tool=get_weather saved=true id=7
+req=3f8a1c02 stage=tool tool=get_weather args={"location":"Москва"} is_error=false result="Москва, Россия: +15.4°C…"
+req=3f8a1c02 stage=deepseek-request endpoint=https://api.deepseek.com/chat/completions model=deepseek-flash tool_choice=- tools_count=2 tools=[…] messages=[…, tool: "…"] streaming=true
+req=3f8a1c02 stage=deepseek-response model=deepseek-flash text="Сейчас в Москве +15.4°C…" tool_calls=[]
+req=3f8a1c02 stage=outbound status=200 body={"event":"done","answer":"Сейчас в Москве +15.4°C…","model":"deepseek"}
+```
+
+- Round 0 is a regular (non-streamed) call that may request a tool; the rounds after a tool call
+  are streamed, and their outcome is logged once the stream ends, assembled from the frames.
+- The `outbound` line carries the terminal frame body (`done` or `error`), with the status `200`
+  the response actually had. A client that disconnects mid-stream cancels the turn and leaves the
+  chain without `outbound`, like the other endpoints.
+- The request body of the client's conversation is logged (truncated at 4096 characters) exactly
+  like every other body; no key, header or configuration object is ever logged.
 
 ## Testing with Postman
 

@@ -21,7 +21,8 @@ import kotlinx.coroutines.flow.flow
  * (D13, D14). The executor itself knows nothing about requests or HTTP; every
  * delegate call goes through the same frozen [com.aiturbo.log.LoggingPromptExecutor]
  * contract, so the logged `endpoint=`/`model=` identify the provider actually used
- * (FR-10).
+ * (FR-10). Both streaming shapes are routed explicitly — the `LLModel` one and the
+ * `ResolvedModel` one — instead of relying on the base-class default (D-10).
  */
 class ProviderRoutingPromptExecutor(
     private val deepseek: PromptExecutor,
@@ -60,6 +61,21 @@ class ProviderRoutingPromptExecutor(
             LlmTarget.DEEPSEEK -> deepseek() to model
         }
         emitAll(delegate.first.executeStreaming(prompt, delegate.second, tools))
+    }
+
+    override fun executeStreaming(
+        prompt: Prompt,
+        model: ResolvedModel,
+        tools: List<ToolDescriptor>,
+    ): Flow<StreamFrame> = flow {
+        // Same collection-time element read as the LLModel overload; the deepseek
+        // branch keeps the model resolved for the request and the delegate reduces
+        // it to its effective model itself.
+        val frames = when (currentLlmTarget()) {
+            LlmTarget.LOCAL -> local.executeStreaming(prompt, localModel, tools)
+            LlmTarget.DEEPSEEK -> deepseek().executeStreaming(prompt, model, tools)
+        }
+        emitAll(frames)
     }
 
     override suspend fun moderate(prompt: Prompt, model: LLModel): ModerationResult =
