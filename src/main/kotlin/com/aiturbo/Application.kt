@@ -34,6 +34,8 @@ import com.aiturbo.tools.GetWeatherTool
 import com.aiturbo.tools.ToolJsonRenderer
 import com.aiturbo.tools.ToolSpec
 import com.aiturbo.tools.ToolSpecLoader
+import com.aiturbo.tools.WebSearchConfig
+import com.aiturbo.tools.WebSearchTool
 import com.aiturbo.tools.weatherToolDescriptor
 import com.aiturbo.weather.KoogWeatherAgent
 import com.aiturbo.weather.OpenMeteoWeatherClient
@@ -46,6 +48,7 @@ import ai.koog.prompt.executor.model.PromptExecutor
 import ai.koog.prompt.llm.LLModel
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
+import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.serialization.kotlinx.json.json
 import com.aiturbo.config.EnvFile
@@ -117,6 +120,9 @@ fun appModules(
             install(ContentNegotiation) {
                 json(Json { ignoreUnknownKeys = true })
             }
+            // No global budget: only requests that ask for one (the web search)
+            // are bounded; the weather client keeps its engine defaults.
+            install(HttpTimeout)
         }
     }
 
@@ -244,22 +250,36 @@ fun fuelingModule(stageDb: StageDbConfig, apiKeyConfigured: Boolean): DI.Module 
 }
 
 /**
- * Chat tools registry tag. The chat registry holds both existing tools; the
+ * Chat tools registry tag. The chat registry holds all three tools; the
  * untagged and fueling registries stay single-tool (FR-15).
  */
 const val CHAT_TOOL_REGISTRY = "chatToolRegistry"
 
+/** The web-search tool spec tag, apart from the weather and fueling specs. */
+const val WEB_SEARCH_TOOL_SPEC = "webSearchToolSpec"
+
 /**
  * The chat slice, additive on top of [appModules] and [fuelingModule]: its own
- * two-tool registry built from the shared tool singletons (nothing is duplicated)
- * and its agent. Imported unconditionally — the local provider path must work
- * with a blank DeepSeek key, and the DeepSeek 503 comes from
- * [com.aiturbo.llm.ProviderAvailability] (route) and the routing executor
+ * three-tool registry built from the shared tool singletons (nothing is duplicated)
+ * plus the web-search tool, and its agent. Imported unconditionally — the local
+ * provider path must work with a blank DeepSeek key, and the DeepSeek 503 comes
+ * from [com.aiturbo.llm.ProviderAvailability] (route) and the routing executor
  * (defense in depth).
  */
-fun chatModule(): DI.Module = DI.Module(name = "chat") {
+fun chatModule(webSearch: WebSearchConfig): DI.Module = DI.Module(name = "chat") {
+    // Fail fast at startup when the resource is missing or invalid.
+    bind<ToolSpec>(tag = WEB_SEARCH_TOOL_SPEC) with eagerSingleton {
+        ToolSpecLoader.load(ToolSpecLoader.WEB_SEARCH_RESOURCE_PATH)
+    }
+    bind<WebSearchTool>() with singleton {
+        WebSearchTool(instance(), webSearch, instance(tag = WEB_SEARCH_TOOL_SPEC))
+    }
     bind<ToolRegistry>(tag = CHAT_TOOL_REGISTRY) with singleton {
-        ToolRegistry.builder().tool(instance<GetWeatherTool>()).tool(instance<FindFuelingTool>()).build()
+        ToolRegistry.builder()
+            .tool(instance<GetWeatherTool>())
+            .tool(instance<FindFuelingTool>())
+            .tool(instance<WebSearchTool>())
+            .build()
     }
     bind<ChatAgent>() with singleton { KoogChatAgent(instance(), instance(tag = CHAT_TOOL_REGISTRY), instance()) }
 }
@@ -286,7 +306,7 @@ fun Application.module(overrideModules: List<DI.Module> = emptyList()) {
                     apiKeyConfigured = deepseek.apiKey.isNotBlank(),
                 )
             )
-            import(chatModule())
+            import(chatModule(webSearch = WebSearchConfig.from(environment.config)))
         } else {
             overrideModules.forEach { import(it) }
         }

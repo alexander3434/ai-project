@@ -769,3 +769,19 @@ Ollama provider):
 
 The consolidated specification is [`spec.md`](docs/features/kodein-exposed-ollama/spec.md)
 in the same folder; this feature supersedes the earlier Koin/plain-JDBC descriptions above.
+
+## Local isolation (Docker Compose)
+
+The full stack — local PostgreSQL, backend, and the React frontend (from `../ai-turbo-web`) —
+runs in containers via `docker compose` (file: `docker-compose.yml`):
+
+```bash
+docker compose up -d --build   # db :5439, backend :8080, web :5173
+docker compose logs -f backend # trace chain (com.aiturbo.trace) lives here
+docker compose down            # stop everything
+```
+
+Secrets (`DEEPSEEK_API_KEY`, `STAGE_DB_PASSWORD`) come from the git-ignored `.env` via
+`env_file`; the backend reaches the database by the service name (`DB_HOST=db`). Note: while the
+stack is up it owns ports 8080/5439/5173 — to use host commands instead (`./gradlew run`,
+`npm run dev`), run `docker compose down` first.

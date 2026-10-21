@@ -30,4 +30,6 @@
 - `code-style-checker` — проверка диффа по CODE_STYLE.md;
 - `reviewer-correctness` — баги и корректность;
 - `reviewer-deduplication` — дублирование/избыточность/симплификация;
-- `reviewer-git` — диффы, git-состояние, секреты.
+- `reviewer-git` — диффы, git-состояние, секреты;
+- `refactorer` — работает ПОСЛЕ ревьюера: читает файл ревью, применяет симплификации и
+  фиксы minors/nits, гонит тесты, пишет `docs/features/<slug>/09-refactor-report.md`.

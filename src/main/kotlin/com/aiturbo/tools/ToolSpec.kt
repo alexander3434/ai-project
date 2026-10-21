@@ -27,6 +27,9 @@ object ToolSpecLoader {
     /** The fueling order lookup tool (the `find_fueling` tool of the /fueling route). */
     const val FUELING_RESOURCE_PATH = "tools/find-fueling-tool.json"
 
+    /** The web-search tool of the chat registry (`web_search`). */
+    const val WEB_SEARCH_RESOURCE_PATH = "tools/web-search-tool.json"
+
     private val logger = LoggerFactory.getLogger(ToolSpecLoader::class.java)
     private val json = Json { ignoreUnknownKeys = true }
 

@@ -106,6 +106,32 @@ class ToolSpecTest {
     }
 
     @Test
+    fun `the shipped web search resource describes the web_search tool`() {
+        val spec = ToolSpecLoader.load(ToolSpecLoader.WEB_SEARCH_RESOURCE_PATH)
+
+        assertEquals("web_search", spec.name)
+        assertTrue(spec.description.contains("интернете"), spec.description)
+
+        val parameters = spec.parameters
+        assertEquals("object", parameters["type"]?.jsonPrimitive?.content)
+        val query = parameters["properties"]!!.jsonObject["query"]!!.jsonObject
+        assertEquals("string", query["type"]?.jsonPrimitive?.content)
+        assertTrue(query["description"]!!.jsonPrimitive.content.isNotBlank())
+        assertEquals(listOf("query"), parameters["required"]!!.jsonArray.map { it.jsonPrimitive.content })
+    }
+
+    @Test
+    fun `loading the web search resource writes one info line naming it`() {
+        LogCapture("com.aiturbo.tools.ToolSpecLoader").use { capture ->
+            ToolSpecLoader.load(ToolSpecLoader.WEB_SEARCH_RESOURCE_PATH)
+
+            val lines = capture.lines()
+            assertEquals(1, lines.size, lines.toString())
+            assertTrue(lines.single().startsWith("Tool spec loaded: name=web_search"), lines.single())
+        }
+    }
+
+    @Test
     fun `the default resource path and the weather resource are unchanged`() {
         assertEquals("tools/get-weather-tool.json", ToolSpecLoader.RESOURCE_PATH)
         assertEquals("get_weather", ToolSpecLoader.load().name)
